@@ -1,0 +1,7 @@
+{
+  "name": "LegalEase AI",
+  "description": "LegalEase AI helps people understand, compare, and navigate complex legal information using Generative AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
