@@ -541,7 +541,34 @@ import {
   isPlainObject,
   sanitizeFileName,
   sanitizeMatterContext,
+  executeWithModelFallback,
 } from "./server/securityHelpers.js";
+
+const PRIMARY_MODEL = "gemini-3.8-flash";
+const FALLBACK_MODEL = "gemini-3.1-flash-lite";
+const CANDIDATE_MODELS = [PRIMARY_MODEL, FALLBACK_MODEL];
+
+interface SafeDiagnosticEvent {
+  endpoint: string;
+  errorCategory: string;
+  httpStatus?: number | string;
+  geminiErrorCode?: number | string;
+  modelIdentifier: string;
+  requestStage: string;
+  sanitizedMessage: string;
+}
+
+function logSafeDiagnostic(event: SafeDiagnosticEvent) {
+  console.error("[LegalEase AI Diagnostic Event]", {
+    endpoint: event.endpoint,
+    errorCategory: event.errorCategory,
+    httpStatus: event.httpStatus ?? "N/A",
+    geminiErrorCode: event.geminiErrorCode ?? "N/A",
+    modelIdentifier: event.modelIdentifier,
+    requestStage: event.requestStage,
+    sanitizedMessage: sanitizeLog(event.sanitizedMessage),
+  });
+}
 
 const analyzeRateLimiter = createRateLimiter(60000, 15);
 const qaRateLimiter = createRateLimiter(60000, 30);
@@ -621,18 +648,30 @@ Generate the comprehensive, 14-section informational analysis using clear, plain
 Extract only what is directly supported by the document. If any detail is not found, state "Not stated in the provided document."`,
       };
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: [pdfPart, promptPart],
-        config: {
-          systemInstruction: SYSTEM_INSTRUCTIONS,
-          responseMimeType: "application/json",
-          responseSchema: analysisResponseSchema,
-          temperature: 0.1,
+      const { text: responseText } = await executeWithModelFallback(
+        ai.models,
+        {
+          contents: [pdfPart, promptPart],
+          config: {
+            systemInstruction: SYSTEM_INSTRUCTIONS,
+            responseMimeType: "application/json",
+            responseSchema: analysisResponseSchema,
+            temperature: 0.1,
+          },
         },
-      });
+        CANDIDATE_MODELS,
+        (diag) => {
+          logSafeDiagnostic({
+            endpoint: "/api/analyze-employee-document",
+            errorCategory: diag.status === 503 || diag.status === 429 ? "TRANSIENT_MODEL_UNAVAILABLE" : "MODEL_CALL_ERROR",
+            httpStatus: diag.status,
+            modelIdentifier: diag.model,
+            requestStage: "generate_analysis_content",
+            sanitizedMessage: diag.error,
+          });
+        }
+      );
 
-      const responseText = response.text;
       if (!responseText) {
         throw new Error("Empty response received from AI model");
       }
@@ -649,9 +688,16 @@ Extract only what is directly supported by the document. If any detail is not fo
         analysis: parsedAnalysis,
       });
     } catch (err: unknown) {
-      // Log sanitized error message without leaking sensitive tokens or document data
-      const errorMessage = err instanceof Error ? err.message : "Unknown error";
-      console.error("[LegalEase AI Server Error]", sanitizeLog(errorMessage));
+      const errObj = err as any;
+      logSafeDiagnostic({
+        endpoint: "/api/analyze-employee-document",
+        errorCategory: "ANALYSIS_FAILURE",
+        httpStatus: errObj?.status ?? errObj?.statusCode ?? 500,
+        geminiErrorCode: errObj?.error?.code ?? errObj?.code,
+        modelIdentifier: PRIMARY_MODEL,
+        requestStage: "endpoint_handler",
+        sanitizedMessage: err instanceof Error ? err.message : "Unknown error",
+      });
 
       // Return friendly generic user-facing error as strictly required by prompt
       return res.status(500).json({
@@ -723,18 +769,30 @@ Extract only what is directly supported by the document. If any detail is not fo
 
       const ai = getGenAI();
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents,
-        config: {
-          systemInstruction: QA_SYSTEM_INSTRUCTIONS,
-          responseMimeType: "application/json",
-          responseSchema: qaResponseSchema,
-          temperature: 0.1,
+      const { text: responseText } = await executeWithModelFallback(
+        ai.models,
+        {
+          contents,
+          config: {
+            systemInstruction: QA_SYSTEM_INSTRUCTIONS,
+            responseMimeType: "application/json",
+            responseSchema: qaResponseSchema,
+            temperature: 0.1,
+          },
         },
-      });
+        CANDIDATE_MODELS,
+        (diag) => {
+          logSafeDiagnostic({
+            endpoint: "/api/ask-document-question",
+            errorCategory: diag.status === 503 || diag.status === 429 ? "TRANSIENT_MODEL_UNAVAILABLE" : "MODEL_CALL_ERROR",
+            httpStatus: diag.status,
+            modelIdentifier: diag.model,
+            requestStage: "generate_qa_content",
+            sanitizedMessage: diag.error,
+          });
+        }
+      );
 
-      const responseText = response.text;
       if (!responseText) {
         throw new Error("Empty response from AI model for question");
       }
@@ -757,8 +815,16 @@ Extract only what is directly supported by the document. If any detail is not fo
         },
       });
     } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : "Unknown error";
-      console.error("[LegalEase AI Q&A Server Error]", sanitizeLog(errorMessage));
+      const errObj = err as any;
+      logSafeDiagnostic({
+        endpoint: "/api/ask-document-question",
+        errorCategory: "QA_FAILURE",
+        httpStatus: errObj?.status ?? errObj?.statusCode ?? 500,
+        geminiErrorCode: errObj?.error?.code ?? errObj?.code,
+        modelIdentifier: PRIMARY_MODEL,
+        requestStage: "qa_endpoint_handler",
+        sanitizedMessage: err instanceof Error ? err.message : "Unknown error",
+      });
 
       // Return exact required error message
       return res.status(500).json({
@@ -821,18 +887,30 @@ Ensure differencesCount in comparisonOverview matches the exact number of change
 Return the structured JSON output adhering strictly to the schema.`,
       };
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: [doc1Part, doc2Part, promptPart],
-        config: {
-          systemInstruction: COMPARISON_SYSTEM_INSTRUCTIONS,
-          responseMimeType: "application/json",
-          responseSchema: comparisonResponseSchema,
-          temperature: 0.1,
+      const { text: responseText } = await executeWithModelFallback(
+        ai.models,
+        {
+          contents: [doc1Part, doc2Part, promptPart],
+          config: {
+            systemInstruction: COMPARISON_SYSTEM_INSTRUCTIONS,
+            responseMimeType: "application/json",
+            responseSchema: comparisonResponseSchema,
+            temperature: 0.1,
+          },
         },
-      });
+        CANDIDATE_MODELS,
+        (diag) => {
+          logSafeDiagnostic({
+            endpoint: "/api/compare-employee-documents",
+            errorCategory: diag.status === 503 || diag.status === 429 ? "TRANSIENT_MODEL_UNAVAILABLE" : "MODEL_CALL_ERROR",
+            httpStatus: diag.status,
+            modelIdentifier: diag.model,
+            requestStage: "generate_comparison_content",
+            sanitizedMessage: diag.error,
+          });
+        }
+      );
 
-      const responseText = response.text;
       if (!responseText) {
         throw new Error("Empty response from AI comparison model");
       }
@@ -854,8 +932,16 @@ Return the structured JSON output adhering strictly to the schema.`,
         comparison: parsedComparison,
       });
     } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : "Unknown error";
-      console.error("[LegalEase AI Comparison Server Error]", sanitizeLog(errorMessage));
+      const errObj = err as any;
+      logSafeDiagnostic({
+        endpoint: "/api/compare-employee-documents",
+        errorCategory: "COMPARISON_FAILURE",
+        httpStatus: errObj?.status ?? errObj?.statusCode ?? 500,
+        geminiErrorCode: errObj?.error?.code ?? errObj?.code,
+        modelIdentifier: PRIMARY_MODEL,
+        requestStage: "comparison_endpoint_handler",
+        sanitizedMessage: err instanceof Error ? err.message : "Unknown error",
+      });
 
       // Return exact required error message
       return res.status(500).json({
